@@ -3,7 +3,6 @@ import type { DrawEvent, DrawPoint, DrawTool, Stroke } from '../types';
 import { generateId } from './game';
 
 export interface UseCanvasOptions {
-  /** Called for every draw event — wire to network in online mode */
   onDrawEvent?: (event: DrawEvent) => void;
 }
 
@@ -17,13 +16,11 @@ export interface UseCanvasReturn {
   setSize: (s: number) => void;
   undo: () => void;
   clear: () => void;
-  /** Replay an incoming remote draw event onto the canvas */
   applyRemoteEvent: (event: DrawEvent) => void;
 }
 
 const BG = '#ffffff';
 
-/** Normalise pointer position to 0-1 relative to canvas */
 function normalise(canvas: HTMLCanvasElement, clientX: number, clientY: number): DrawPoint {
   const r = canvas.getBoundingClientRect();
   return {
@@ -32,7 +29,6 @@ function normalise(canvas: HTMLCanvasElement, clientX: number, clientY: number):
   };
 }
 
-/** Denormalise 0-1 point to canvas pixel coords */
 function denorm(canvas: HTMLCanvasElement, p: DrawPoint): { x: number; y: number } {
   return { x: p.x * canvas.width, y: p.y * canvas.height };
 }
@@ -46,10 +42,10 @@ function drawStrokeOnCtx(
   canvas: HTMLCanvasElement,
   stroke: Stroke
 ) {
-  if (stroke.points.length < 2) {
-    // Single dot
+  if (stroke.points.length === 0) return;
+
+  if (stroke.points.length === 1) {
     const p = stroke.points[0];
-    if (!p) return;
     const { x, y } = denorm(canvas, p);
     ctx.beginPath();
     ctx.fillStyle = getStrokeStyle(stroke.tool);
@@ -85,13 +81,24 @@ function redrawAll(
   }
 }
 
+/** Set canvas pixel dimensions to match its CSS layout size */
+function syncCanvasSize(canvas: HTMLCanvasElement): boolean {
+  const r = canvas.getBoundingClientRect();
+  const w = Math.round(r.width);
+  const h = Math.round(r.height);
+  if (w === 0 || h === 0) return false;
+  if (canvas.width === w && canvas.height === h) return true;
+  canvas.width = w;
+  canvas.height = h;
+  return true;
+}
+
 export function useCanvas({ onDrawEvent }: UseCanvasOptions = {}): UseCanvasReturn {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [strokes, setStrokes] = useState<Stroke[]>([]);
   const [currentTool, setCurrentTool] = useState<DrawTool>('pen');
   const [currentSize, setCurrentSize] = useState<number>(4);
 
-  // Refs for live drawing (avoid stale closure)
   const strokesRef = useRef<Stroke[]>([]);
   const activeStrokeRef = useRef<Stroke | null>(null);
   const isDrawingRef = useRef(false);
@@ -99,58 +106,70 @@ export function useCanvas({ onDrawEvent }: UseCanvasOptions = {}): UseCanvasRetu
   const sizeRef = useRef<number>(4);
   const batchRef = useRef<DrawPoint[]>([]);
   const batchTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const onDrawEventRef = useRef(onDrawEvent);
 
-  // Keep refs in sync
+  useEffect(() => { onDrawEventRef.current = onDrawEvent; }, [onDrawEvent]);
   useEffect(() => { toolRef.current = currentTool; }, [currentTool]);
   useEffect(() => { sizeRef.current = currentSize; }, [currentSize]);
 
-  // Initial fill
+  // ── Initialise canvas size after first paint ──────────────────────────────
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    ctx.fillStyle = BG;
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    function init() {
+      if (!canvas) return;
+      const ok = syncCanvasSize(canvas);
+      if (!ok) {
+        // Layout not ready yet — retry next frame
+        requestAnimationFrame(init);
+        return;
+      }
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      ctx.fillStyle = BG;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
+
+    // Wait two frames: one for React paint, one for browser layout
+    requestAnimationFrame(() => requestAnimationFrame(init));
   }, []);
 
-  // Resize handler — redraw on resize to avoid distortion
+  // ── ResizeObserver — keep pixel dims in sync with CSS size ───────────────
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    function handleResize() {
+    const ro = new ResizeObserver(() => {
       if (!canvas) return;
       const ctx = canvas.getContext('2d');
       if (!ctx) return;
-      // Save current drawings as image before resize
-      const img = new Image();
-      img.src = canvas.toDataURL();
-      const w = canvas.offsetWidth;
-      const h = canvas.offsetHeight;
-      canvas.width = w;
-      canvas.height = h;
-      ctx.fillStyle = BG;
-      ctx.fillRect(0, 0, w, h);
-      img.onload = () => {
-        ctx.drawImage(img, 0, 0, w, h);
-      };
-    }
 
-    const ro = new ResizeObserver(handleResize);
+      // Snapshot current drawing
+      const snap = canvas.toDataURL();
+      const ok = syncCanvasSize(canvas);
+      if (!ok) return;
+
+      ctx.fillStyle = BG;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      const img = new Image();
+      img.onload = () => {
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      };
+      img.src = snap;
+    });
+
     ro.observe(canvas);
-    // Set initial size
-    canvas.width = canvas.offsetWidth;
-    canvas.height = canvas.offsetHeight;
     return () => ro.disconnect();
   }, []);
 
-  // Batch flush — send accumulated points every 40ms
+  // ── Batch flush ───────────────────────────────────────────────────────────
   function startBatch() {
     if (batchTimerRef.current) return;
     batchTimerRef.current = setInterval(() => {
       if (batchRef.current.length > 0) {
-        onDrawEvent?.({ type: 'DRAW_MOVE', points: [...batchRef.current] });
+        onDrawEventRef.current?.({ type: 'DRAW_MOVE', points: [...batchRef.current] });
         batchRef.current = [];
       }
     }, 40);
@@ -162,16 +181,24 @@ export function useCanvas({ onDrawEvent }: UseCanvasOptions = {}): UseCanvasRetu
       batchTimerRef.current = null;
     }
     if (batchRef.current.length > 0) {
-      onDrawEvent?.({ type: 'DRAW_MOVE', points: [...batchRef.current] });
+      onDrawEventRef.current?.({ type: 'DRAW_MOVE', points: [...batchRef.current] });
       batchRef.current = [];
     }
   }
 
+  // ── Core draw callbacks (stable refs — no deps) ───────────────────────────
   const startDraw = useCallback((clientX: number, clientY: number) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
+
+    // Ensure canvas has correct pixel size before drawing
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
+    if (canvas.width === 0 || canvas.height === 0) {
+      syncCanvasSize(canvas);
+      ctx.fillStyle = BG;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    }
 
     isDrawingRef.current = true;
     const pt = normalise(canvas, clientX, clientY);
@@ -183,7 +210,7 @@ export function useCanvas({ onDrawEvent }: UseCanvasOptions = {}): UseCanvasRetu
     };
     activeStrokeRef.current = stroke;
 
-    onDrawEvent?.({
+    onDrawEventRef.current?.({
       type: 'DRAW_START',
       stroke: { id: stroke.id, tool: stroke.tool, size: stroke.size },
       x: pt.x,
@@ -192,9 +219,9 @@ export function useCanvas({ onDrawEvent }: UseCanvasOptions = {}): UseCanvasRetu
 
     startBatch();
 
-    // Draw dot immediately
+    // Draw initial dot
     drawStrokeOnCtx(ctx, canvas, stroke);
-  }, [onDrawEvent]);
+  }, []);
 
   const moveDraw = useCallback((clientX: number, clientY: number) => {
     if (!isDrawingRef.current || !activeStrokeRef.current) return;
@@ -207,7 +234,6 @@ export function useCanvas({ onDrawEvent }: UseCanvasOptions = {}): UseCanvasRetu
     activeStrokeRef.current.points.push(pt);
     batchRef.current.push(pt);
 
-    // Draw incrementally
     const pts = activeStrokeRef.current.points;
     const prev = pts[pts.length - 2];
     const curr = pts[pts.length - 1];
@@ -228,37 +254,29 @@ export function useCanvas({ onDrawEvent }: UseCanvasOptions = {}): UseCanvasRetu
   const endDraw = useCallback(() => {
     if (!isDrawingRef.current || !activeStrokeRef.current) return;
     isDrawingRef.current = false;
-
     stopBatch();
-    onDrawEvent?.({ type: 'DRAW_END' });
+    onDrawEventRef.current?.({ type: 'DRAW_END' });
 
-    const finished = { ...activeStrokeRef.current };
+    const finished = { ...activeStrokeRef.current, points: [...activeStrokeRef.current.points] };
     strokesRef.current = [...strokesRef.current, finished];
     setStrokes([...strokesRef.current]);
     activeStrokeRef.current = null;
-  }, [onDrawEvent]);
+  }, []);
 
-  // Mouse events
+  // ── Mouse events ──────────────────────────────────────────────────────────
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    function onMouseDown(e: MouseEvent) {
-      e.preventDefault();
-      startDraw(e.clientX, e.clientY);
-    }
-    function onMouseMove(e: MouseEvent) {
-      if (!isDrawingRef.current) return;
-      moveDraw(e.clientX, e.clientY);
-    }
-    function onMouseUp() { endDraw(); }
-    function onMouseLeave() { if (isDrawingRef.current) endDraw(); }
+    const onMouseDown = (e: MouseEvent) => { e.preventDefault(); startDraw(e.clientX, e.clientY); };
+    const onMouseMove = (e: MouseEvent) => { if (isDrawingRef.current) moveDraw(e.clientX, e.clientY); };
+    const onMouseUp = () => endDraw();
+    const onMouseLeave = () => { if (isDrawingRef.current) endDraw(); };
 
     canvas.addEventListener('mousedown', onMouseDown);
     canvas.addEventListener('mousemove', onMouseMove);
     canvas.addEventListener('mouseup', onMouseUp);
     canvas.addEventListener('mouseleave', onMouseLeave);
-
     return () => {
       canvas.removeEventListener('mousedown', onMouseDown);
       canvas.removeEventListener('mousemove', onMouseMove);
@@ -267,37 +285,44 @@ export function useCanvas({ onDrawEvent }: UseCanvasOptions = {}): UseCanvasRetu
     };
   }, [startDraw, moveDraw, endDraw]);
 
-  // Touch events
+  // ── Touch events ─────────────────────────────────────────────────────────
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    function onTouchStart(e: TouchEvent) {
+    const onTouchStart = (e: TouchEvent) => {
       e.preventDefault();
+      e.stopPropagation();
       const t = e.touches[0];
       if (t) startDraw(t.clientX, t.clientY);
-    }
-    function onTouchMove(e: TouchEvent) {
+    };
+    const onTouchMove = (e: TouchEvent) => {
       e.preventDefault();
+      e.stopPropagation();
       const t = e.touches[0];
       if (t) moveDraw(t.clientX, t.clientY);
-    }
-    function onTouchEnd(e: TouchEvent) {
+    };
+    const onTouchEnd = (e: TouchEvent) => {
       e.preventDefault();
+      e.stopPropagation();
       endDraw();
-    }
+    };
 
+    // passive: false is required for preventDefault to work on touch events
     canvas.addEventListener('touchstart', onTouchStart, { passive: false });
     canvas.addEventListener('touchmove', onTouchMove, { passive: false });
     canvas.addEventListener('touchend', onTouchEnd, { passive: false });
+    canvas.addEventListener('touchcancel', onTouchEnd, { passive: false });
 
     return () => {
       canvas.removeEventListener('touchstart', onTouchStart);
       canvas.removeEventListener('touchmove', onTouchMove);
       canvas.removeEventListener('touchend', onTouchEnd);
+      canvas.removeEventListener('touchcancel', onTouchEnd);
     };
   }, [startDraw, moveDraw, endDraw]);
 
+  // ── Undo / Clear ─────────────────────────────────────────────────────────
   const undo = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -307,8 +332,8 @@ export function useCanvas({ onDrawEvent }: UseCanvasOptions = {}): UseCanvasRetu
     strokesRef.current = next;
     setStrokes([...next]);
     redrawAll(ctx, canvas, next);
-    onDrawEvent?.({ type: 'DRAW_UNDO' });
-  }, [onDrawEvent]);
+    onDrawEventRef.current?.({ type: 'DRAW_UNDO' });
+  }, []);
 
   const clear = useCallback(() => {
     const canvas = canvasRef.current;
@@ -319,10 +344,10 @@ export function useCanvas({ onDrawEvent }: UseCanvasOptions = {}): UseCanvasRetu
     setStrokes([]);
     ctx.fillStyle = BG;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-    onDrawEvent?.({ type: 'DRAW_CLEAR' });
-  }, [onDrawEvent]);
+    onDrawEventRef.current?.({ type: 'DRAW_CLEAR' });
+  }, []);
 
-  // Remote event replay
+  // ── Remote event replay ───────────────────────────────────────────────────
   const applyRemoteEvent = useCallback((event: DrawEvent) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -338,17 +363,14 @@ export function useCanvas({ onDrawEvent }: UseCanvasOptions = {}): UseCanvasRetu
           points: [{ x: event.x, y: event.y }],
         };
         activeStrokeRef.current = stroke;
-        // Draw first dot
         drawStrokeOnCtx(ctx, canvas, stroke);
         break;
       }
       case 'DRAW_MOVE': {
         if (!activeStrokeRef.current) return;
-        const pts2 = activeStrokeRef.current.points; const prev = pts2[pts2.length - 1];
-        for (const pt of event.points) {
-          activeStrokeRef.current.points.push(pt);
-        }
-        // Draw segment from prev to new points
+        const prevPts = activeStrokeRef.current.points;
+        const prev = prevPts[prevPts.length - 1];
+        for (const pt of event.points) activeStrokeRef.current.points.push(pt);
         if (!prev || event.points.length === 0) return;
         ctx.beginPath();
         ctx.strokeStyle = getStrokeStyle(activeStrokeRef.current.tool);
@@ -366,7 +388,7 @@ export function useCanvas({ onDrawEvent }: UseCanvasOptions = {}): UseCanvasRetu
       }
       case 'DRAW_END': {
         if (!activeStrokeRef.current) return;
-        const finished = { ...activeStrokeRef.current };
+        const finished = { ...activeStrokeRef.current, points: [...activeStrokeRef.current.points] };
         strokesRef.current = [...strokesRef.current, finished];
         setStrokes([...strokesRef.current]);
         activeStrokeRef.current = null;
