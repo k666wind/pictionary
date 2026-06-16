@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="80" fill="#1a1a2e"/>
+  <rect x="80" y="100" width="352" height="260" rx="20" fill="#0f3460" stroke="#FFD93D" stroke-width="8"/>
+  <text x="256" y="270" font-size="160" text-anchor="middle" dominant-baseline="middle">🎨</text>
+</svg>
