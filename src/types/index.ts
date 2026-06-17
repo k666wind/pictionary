@@ -63,6 +63,7 @@ export interface RoundResult {
 
 export type Screen =
   | 'home'
+  | 'mode-select'
   | 'setup'
   | 'team-display'
   | 'word-card'
@@ -73,7 +74,14 @@ export type Screen =
   | 'word-bank-manager'
   | 'add-word'
   | 'settings'
-  | 'local-draw';
+  | 'local-draw'
+  // Online screens
+  | 'online-lobby'
+  | 'waiting-room'
+  | 'online-word-card'
+  | 'online-timer'
+  | 'online-round-result'
+  | 'online-game-over';
 
 export interface LeaderboardEntry {
   id: string;

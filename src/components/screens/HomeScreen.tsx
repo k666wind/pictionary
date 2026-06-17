@@ -2,7 +2,7 @@ import { useGameStore } from '../../store/gameStore';
 import FloatingParticles from '../ui/FloatingParticles';
 import InstallBanner from '../ui/InstallBanner';
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '2.0.0';
 
 export default function HomeScreen() {
   const setScreen = useGameStore((s) => s.setScreen);
@@ -80,9 +80,10 @@ export default function HomeScreen() {
           gap: 12,
           animationDelay: '0.25s',
         }}>
+          {/* ← Changed: go to mode-select instead of setup */}
           <button
             className="btn btn-primary btn-lg btn-block"
-            onClick={() => setScreen('setup')}
+            onClick={() => setScreen('mode-select')}
             style={{ fontSize: '1.25rem' }}
           >
             🎮 開始遊戲 Play
@@ -116,6 +117,7 @@ export default function HomeScreen() {
           {[
             '175+ 題目',
             '本地多人',
+            '🌐 網絡多人',
             '自定義題目庫',
             '離線可用',
           ].map((label) => (
@@ -140,7 +142,7 @@ export default function HomeScreen() {
           opacity: 0.5,
           letterSpacing: '0.05em',
         }}>
-          v{APP_VERSION} · Phase 1 · Local Multiplayer
+          v{APP_VERSION} · Phase 2B · Online Multiplayer
         </p>
       </div>
     </div>
