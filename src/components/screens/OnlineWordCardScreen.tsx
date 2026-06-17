@@ -4,20 +4,21 @@ import { useNetworkStore } from '../../store/networkStore';
 
 export default function OnlineWordCardScreen() {
   const setScreen = useGameStore((s) => s.setScreen);
-  const { roomState, myPlayerId, isDrawer, currentWord } = useNetworkStore();
+  const roomState = useNetworkStore((s) => s.roomState);
+  const isDrawer = useNetworkStore((s) => s.isDrawer);
+  const currentWord = useNetworkStore((s) => s.currentWord);
   const [hidden, setHidden] = useState(false);
 
   useEffect(() => {
     if (!roomState) { setScreen('online-lobby'); return; }
-    if (roomState.phase === 'turn_result') setScreen('round-result');
-    if (roomState.phase === 'game_over') setScreen('game-over');
+    if (roomState.phase === 'turn_result') setScreen('online-round-result');
+    if (roomState.phase === 'game_over') setScreen('online-game-over');
   }, [roomState?.phase]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!roomState) return null;
 
   const drawer = roomState.players[roomState.currentDrawerIndex];
   const amDrawer = isDrawer();
-  const totalPlayers = roomState.players.length;
   const round = roomState.currentRound;
   const totalRounds = roomState.settings.totalRounds;
 
@@ -34,12 +35,10 @@ export default function OnlineWordCardScreen() {
         textAlign: 'center',
       }}
     >
-      {/* Round info */}
       <div style={{ fontSize: 14, opacity: 0.6 }}>
-        第 {round} / {totalRounds} 輪 &nbsp;·&nbsp; {totalPlayers} 位玩家
+        第 {round} / {totalRounds} 輪 &nbsp;·&nbsp; {roomState.players.length} 位玩家
       </div>
 
-      {/* Drawer label */}
       <div
         style={{
           background: 'var(--color-primary, #7c3aed)',
@@ -52,7 +51,6 @@ export default function OnlineWordCardScreen() {
         {amDrawer ? '你係畫者！🎨' : `✏️ ${drawer?.name ?? '??'} 畫緊`}
       </div>
 
-      {/* Word (drawer only) */}
       {amDrawer && currentWord && (
         <div>
           <div
@@ -77,7 +75,6 @@ export default function OnlineWordCardScreen() {
         </div>
       )}
 
-      {/* Waiting (non-drawer) */}
       {!amDrawer && (
         <div style={{ fontSize: 18, opacity: 0.6 }}>
           等待畫者開始…<br />
@@ -85,7 +82,6 @@ export default function OnlineWordCardScreen() {
         </div>
       )}
 
-      {/* CTA — drawer starts drawing */}
       {amDrawer && (
         <button
           onClick={() => setScreen('online-timer')}

@@ -5,32 +5,21 @@ import type { Word } from '../types';
 type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
 
 interface NetworkState {
-  // Connection
   ws: WebSocket | null;
   connectionStatus: ConnectionStatus;
   roomCode: string | null;
-
-  // Room
   roomState: RoomState | null;
   myPlayerId: string | null;
   myPlayerName: string;
   myTeamName: string;
-
-  // Game — word only sent to drawer
   currentWord: Word | null;
-
-  // Canvas events buffer (for ViewerCanvas replay)
   currentDrawEvents: DrawEvent[];
-
-  // Error
   lastError: string | null;
 
-  // Derived helpers (computed inline)
   isHost: () => boolean;
   isDrawer: () => boolean;
   getCurrentDrawer: () => NetworkPlayer | null;
 
-  // Actions
   createRoom: (playerName: string, teamName: string) => void;
   joinRoom: (code: string, playerName: string, teamName: string) => void;
   leaveRoom: () => void;
@@ -41,8 +30,12 @@ interface NetworkState {
   kickPlayer: (id: string) => void;
   sendDrawEvent: (event: DrawEvent) => void;
   clearError: () => void;
+
+  // Internal — must be declared in interface for TypeScript
   _handleServerMessage: (msg: ServerMessage) => void;
   _setPlayerId: (id: string) => void;
+  _connect: (roomCode: string, playerName: string, teamName: string) => void;
+  _send: (msg: ClientMessage) => void;
 }
 
 function generateRoomCode(): string {
@@ -51,7 +44,11 @@ function generateRoomCode(): string {
 }
 
 function getPartyKitUrl(roomCode: string): string {
-  const host = import.meta.env.VITE_PARTYKIT_HOST ?? 'localhost:1999';
+  // Use VITE_ env var if available (Vite injects these at build time)
+  const host: string =
+    typeof (globalThis as Record<string, unknown>).__PARTYKIT_HOST__ === 'string'
+      ? (globalThis as Record<string, string>).__PARTYKIT_HOST__
+      : 'localhost:1999';
   const isLocal = host.startsWith('localhost');
   const protocol = isLocal ? 'ws' : 'wss';
   return `${protocol}://${host}/party/${roomCode.toLowerCase()}`;
@@ -88,8 +85,7 @@ export const useNetworkStore = create<NetworkState>((set, get) => ({
   },
 
   createRoom: (playerName, teamName) => {
-    const roomCode = generateRoomCode();
-    get()._connect(roomCode, playerName, teamName);
+    get()._connect(generateRoomCode(), playerName, teamName);
   },
 
   joinRoom: (code, playerName, teamName) => {
@@ -97,8 +93,7 @@ export const useNetworkStore = create<NetworkState>((set, get) => ({
   },
 
   leaveRoom: () => {
-    const { ws } = get();
-    ws?.close();
+    get().ws?.close();
     set({
       ws: null,
       connectionStatus: 'disconnected',
@@ -132,27 +127,21 @@ export const useNetworkStore = create<NetworkState>((set, get) => ({
   _setPlayerId: (id) => set({ myPlayerId: id }),
 
   _handleServerMessage: (msg) => {
-    const state = get();
     switch (msg.type) {
       case 'ROOM_STATE':
         set({ roomState: msg.room });
         break;
-
       case 'GAME_STARTED':
-        // Reset draw events for new turn
         set({ currentDrawEvents: [], currentWord: null });
         break;
-
       case 'YOUR_WORD':
         set({ currentWord: msg.word });
         break;
-
       case 'TIMER_TICK':
         set((s) => ({
           roomState: s.roomState ? { ...s.roomState, timeLeft: msg.timeLeft } : null,
         }));
         break;
-
       case 'TURN_END':
         set((s) => ({
           roomState: s.roomState
@@ -161,7 +150,6 @@ export const useNetworkStore = create<NetworkState>((set, get) => ({
           currentWord: null,
         }));
         break;
-
       case 'GAME_OVER':
         set((s) => ({
           roomState: s.roomState
@@ -169,7 +157,6 @@ export const useNetworkStore = create<NetworkState>((set, get) => ({
             : null,
         }));
         break;
-
       case 'PLAYER_JOINED':
         set((s) => ({
           roomState: s.roomState
@@ -177,7 +164,6 @@ export const useNetworkStore = create<NetworkState>((set, get) => ({
             : null,
         }));
         break;
-
       case 'PLAYER_LEFT':
         set((s) => ({
           roomState: s.roomState
@@ -190,84 +176,58 @@ export const useNetworkStore = create<NetworkState>((set, get) => ({
             : null,
         }));
         break;
-
       case 'KICKED':
-        // We were kicked — leave
-        state.leaveRoom();
+        get().leaveRoom();
         set({ lastError: '你已被房主移除房間' });
         break;
-
       case 'ERROR':
         set({ lastError: msg.message });
         break;
-
-      // Draw relay events
       case 'DRAW_START':
       case 'DRAW_MOVE':
       case 'DRAW_END':
       case 'DRAW_UNDO':
       case 'DRAW_CLEAR': {
-        // Strip fromId, add to draw events buffer
-        // eslint-disable-next-line @typescript-eslint/no-unused-vars
-        const { fromId: _fid, ...event } = msg as typeof msg & { fromId: string };
+        const { fromId: _discarded, ...event } = msg as typeof msg & { fromId: string };
+        void _discarded;
         set((s) => ({ currentDrawEvents: [...s.currentDrawEvents, event as DrawEvent] }));
         break;
       }
     }
   },
 
-  // Internal
-  _connect: (roomCode: string, playerName: string, teamName: string) => {
-    const existing = get().ws;
-    existing?.close();
-
+  _connect: (roomCode, playerName, teamName) => {
+    get().ws?.close();
     set({ connectionStatus: 'connecting', roomCode, myPlayerName: playerName, myTeamName: teamName });
 
-    const url = getPartyKitUrl(roomCode);
-    const ws = new WebSocket(url);
+    const ws = new WebSocket(getPartyKitUrl(roomCode));
 
     ws.onopen = () => {
       set({ connectionStatus: 'connected' });
-      // PartyKit connection id comes via the URL; we use a workaround: send JOIN first
-      // and the server will use conn.id which is the PartyKit connection ID.
-      // We get our ID from the first ROOM_STATE — find ourselves by name match.
       ws.send(JSON.stringify({ type: 'JOIN', playerName, teamName } as ClientMessage));
     };
-
-    ws.onclose = () => {
-      set({ connectionStatus: 'disconnected' });
-    };
-
-    ws.onerror = () => {
+    ws.onclose = () => set({ connectionStatus: 'disconnected' });
+    ws.onerror = () =>
       set({ connectionStatus: 'error', lastError: '連線失敗，請檢查網絡' });
-    };
-
     ws.onmessage = (e) => {
       try {
-        const msg = JSON.parse(e.data) as ServerMessage;
-
-        // Auto-detect our playerId from ROOM_STATE when we don't have it yet
+        const msg = JSON.parse(e.data as string) as ServerMessage;
         if (msg.type === 'ROOM_STATE' && !get().myPlayerId) {
           const { myPlayerName } = get();
-          const match = msg.room.players.find(
-            (p) => p.name === myPlayerName && p.isConnected
-          );
+          const match = msg.room.players.find((p) => p.name === myPlayerName && p.isConnected);
           if (match) set({ myPlayerId: match.id });
         }
-
         get()._handleServerMessage(msg);
-      } catch {
-        // ignore
-      }
+      } catch { /* ignore */ }
     };
 
     set({ ws });
   },
 
-  _send: (msg: ClientMessage) => {
+  _send: (msg) => {
     const { ws } = get();
     if (ws?.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(msg));
     }
   },
-} as NetworkState & { _connect: (r: string, p: string, t: string) => void; _send: (m: ClientMessage) => void }));
+}));
