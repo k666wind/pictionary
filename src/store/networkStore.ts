@@ -44,11 +44,9 @@ function generateRoomCode(): string {
 }
 
 function getPartyKitUrl(roomCode: string): string {
-  // Use VITE_ env var if available (Vite injects these at build time)
-  const host: string =
-    typeof (globalThis as Record<string, unknown>).__PARTYKIT_HOST__ === 'string'
-      ? (globalThis as Record<string, string>).__PARTYKIT_HOST__
-      : 'localhost:1999';
+  // __PARTYKIT_HOST__ is injected at build time by vite.config.ts define block
+  // declared in src/vite-env.d.ts as: declare const __PARTYKIT_HOST__: string
+  const host: string = __PARTYKIT_HOST__;
   const isLocal = host.startsWith('localhost');
   const protocol = isLocal ? 'ws' : 'wss';
   return `${protocol}://${host}/party/${roomCode.toLowerCase()}`;
