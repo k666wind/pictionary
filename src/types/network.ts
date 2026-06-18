@@ -1,32 +1,29 @@
 import type { Word, Category, Difficulty, DrawEvent, DrawPoint, DrawTool } from './index';
-
 export type { DrawEvent, DrawPoint, DrawTool };
 
 export interface NetworkPlayer {
   id: string; name: string; teamName: string;
   isReady: boolean; isHost: boolean; isConnected: boolean;
 }
-
 export interface RoomSettings {
   totalRounds: number; timerSeconds: number;
   difficulty: 'all' | Difficulty; categories: Category[];
   canvasEnabled: boolean; wordBankIds: string[];
 }
-
 export interface TurnResult {
   drawerId: string; wordEn: string; wordZh: string;
   guessed: boolean; skipped: boolean; timeLeft: number;
 }
-
 export interface RoomState {
   roomCode: string; hostId: string;
-  phase: 'waiting' | 'playing' | 'turn_result' | 'countdown' | 'game_over';
+  phase: 'waiting'|'playing'|'turn_result'|'countdown'|'game_over';
   players: NetworkPlayer[]; settings: RoomSettings;
   currentRound: number; currentDrawerIndex: number;
   timeLeft: number; turnDrawEvents: DrawEvent[];
   lastResult?: TurnResult; scores: Record<string, number>;
   wordQueue: Word[]; currentWordIndex: number;
   countdown: number;
+  skipVotes: string[];
 }
 
 export type ClientMessage =
@@ -34,7 +31,9 @@ export type ClientMessage =
   | { type: 'READY' } | { type: 'UNREADY' } | { type: 'LEAVE' }
   | { type: 'START_GAME'; settings: RoomSettings; wordQueue: Word[] }
   | { type: 'TIMER_TICK'; timeLeft: number }
-  | { type: 'GUESSED' } | { type: 'SKIPPED' }
+  | { type: 'GUESSED' }
+  | { type: 'VOTE_SKIP' }
+  | { type: 'TIME_UP' }
   | { type: 'KICK'; playerId: string }
   | { type: 'DRAW_START'; stroke: { id: string; tool: DrawTool; size: number }; x: number; y: number }
   | { type: 'DRAW_MOVE'; points: DrawPoint[] }
@@ -47,7 +46,7 @@ export type ServerMessage =
   | { type: 'TIMER_TICK'; timeLeft: number }
   | { type: 'TURN_END'; result: TurnResult; scores: Record<string, number> }
   | { type: 'TURN_DRAW_EVENTS'; events: DrawEvent[] }
-  | { type: 'GAME_OVER'; finalScores: Record<string, number> }
+  | { type: 'GAME_OVER'; finalScores: Record<string, number>; reason?: string }
   | { type: 'PLAYER_JOINED'; player: NetworkPlayer }
   | { type: 'PLAYER_LEFT'; playerId: string }
   | { type: 'KICKED' } | { type: 'YOU_LEFT' }

@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import type { RoomState, NetworkPlayer, RoomSettings, ServerMessage, ClientMessage, DrawEvent } from '../types/network';
 import type { Word } from '../types';
 
-type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
+type ConnectionStatus = 'disconnected'|'connecting'|'connected'|'error';
 
 interface NetworkState {
   ws: WebSocket | null;
@@ -13,9 +13,7 @@ interface NetworkState {
   myPlayerName: string;
   myTeamName: string;
   currentWord: Word | null;
-  // Live draw events (during playing phase)
   currentDrawEvents: DrawEvent[];
-  // Stored draw events for turn_result replay
   turnDrawEvents: DrawEvent[];
   lastError: string | null;
 
@@ -29,7 +27,7 @@ interface NetworkState {
   setReady: (ready: boolean) => void;
   startGame: (settings: RoomSettings, wordQueue: Word[]) => void;
   markGuessed: () => void;
-  markSkipped: () => void;
+  voteSkip: () => void;
   kickPlayer: (id: string) => void;
   sendDrawEvent: (event: DrawEvent) => void;
   clearError: () => void;
@@ -47,168 +45,89 @@ function generateRoomCode(): string {
 function getWsUrl(roomCode: string): string {
   const host: string = __PARTYKIT_HOST__;
   const isLocal = host.startsWith('localhost');
-  const protocol = isLocal ? 'ws' : 'wss';
-  return `${protocol}://${host}/party/${roomCode.toLowerCase()}`;
+  return `${isLocal ? 'ws' : 'wss'}://${host}/party/${roomCode.toLowerCase()}`;
 }
 
 export const useNetworkStore = create<NetworkState>((set, get) => ({
-  ws: null,
-  connectionStatus: 'disconnected',
-  roomCode: null,
-  roomState: null,
-  myPlayerId: null,
-  myPlayerName: '',
-  myTeamName: '',
-  currentWord: null,
-  currentDrawEvents: [],
-  turnDrawEvents: [],
-  lastError: null,
+  ws: null, connectionStatus: 'disconnected', roomCode: null,
+  roomState: null, myPlayerId: null, myPlayerName: '', myTeamName: '',
+  currentWord: null, currentDrawEvents: [], turnDrawEvents: [], lastError: null,
 
   isHost: () => {
     const { myPlayerId, roomState } = get();
     return !!myPlayerId && roomState?.hostId === myPlayerId;
   },
-
   isDrawer: () => {
     const { myPlayerId, roomState } = get();
     if (!myPlayerId || !roomState) return false;
     return roomState.players[roomState.currentDrawerIndex]?.id === myPlayerId;
   },
-
   getCurrentDrawer: () => {
     const { roomState } = get();
-    if (!roomState) return null;
-    return roomState.players[roomState.currentDrawerIndex] ?? null;
+    return roomState?.players[roomState.currentDrawerIndex] ?? null;
   },
 
-  createRoom: (playerName, teamName) => {
-    get()._connect(generateRoomCode(), playerName, teamName);
-  },
-
-  joinRoom: (code, playerName, teamName) => {
-    get()._connect(code.toUpperCase(), playerName, teamName);
-  },
+  createRoom: (p, t) => get()._connect(generateRoomCode(), p, t),
+  joinRoom: (code, p, t) => get()._connect(code.toUpperCase(), p, t),
 
   leaveRoom: () => {
-    // Tell server we're leaving
-    get()._send({ type: 'LEAVE' } as ClientMessage);
+    get()._send({ type: 'LEAVE' });
     get().ws?.close();
-    set({
-      ws: null, connectionStatus: 'disconnected',
-      roomCode: null, roomState: null, myPlayerId: null,
-      currentWord: null, currentDrawEvents: [], turnDrawEvents: [],
-      lastError: null,
-    });
+    set({ ws: null, connectionStatus: 'disconnected', roomCode: null, roomState: null,
+      myPlayerId: null, currentWord: null, currentDrawEvents: [], turnDrawEvents: [], lastError: null });
   },
 
-  setReady: (ready) => {
-    get()._send(ready ? { type: 'READY' } : { type: 'UNREADY' });
-  },
-
-  startGame: (settings, wordQueue) => {
-    get()._send({ type: 'START_GAME', settings, wordQueue });
-  },
-
+  setReady: (ready) => get()._send(ready ? { type: 'READY' } : { type: 'UNREADY' }),
+  startGame: (settings, wordQueue) => get()._send({ type: 'START_GAME', settings, wordQueue }),
   markGuessed: () => get()._send({ type: 'GUESSED' }),
-  markSkipped: () => get()._send({ type: 'SKIPPED' }),
+  voteSkip: () => get()._send({ type: 'VOTE_SKIP' }),
   kickPlayer: (id) => get()._send({ type: 'KICK', playerId: id }),
-
-  sendDrawEvent: (event) => {
-    get()._send(event as unknown as ClientMessage);
-  },
-
+  sendDrawEvent: (event) => get()._send(event as unknown as ClientMessage),
   clearError: () => set({ lastError: null }),
 
   _handleServerMessage: (msg) => {
     switch (msg.type) {
       case 'ROOM_STATE':
-        set({ roomState: msg.room });
-        break;
-
+        set({ roomState: msg.room }); break;
       case 'GAME_STARTED':
-        // New turn starting — clear draw events
-        set({ currentDrawEvents: [], turnDrawEvents: [], currentWord: null });
-        break;
-
+        set({ currentDrawEvents: [], turnDrawEvents: [], currentWord: null }); break;
       case 'YOUR_WORD':
-        set({ currentWord: msg.word });
-        break;
-
+        set({ currentWord: msg.word }); break;
       case 'TIMER_TICK':
-        set((s) => ({
-          roomState: s.roomState ? { ...s.roomState, timeLeft: msg.timeLeft } : null,
-        }));
-        break;
-
+        set((s) => ({ roomState: s.roomState ? { ...s.roomState, timeLeft: msg.timeLeft } : null })); break;
       case 'TURN_END':
         set((s) => ({
           roomState: s.roomState
             ? { ...s.roomState, phase: 'turn_result', scores: msg.scores, lastResult: msg.result }
             : null,
-          currentWord: null,
-          currentDrawEvents: [],
-        }));
-        break;
-
+          currentWord: null, currentDrawEvents: [],
+        })); break;
       case 'TURN_DRAW_EVENTS':
-        // Server sends stored draw events for replay on turn_result screen
-        set({ turnDrawEvents: msg.events });
-        break;
-
+        set({ turnDrawEvents: msg.events }); break;
       case 'GAME_OVER':
         set((s) => ({
-          roomState: s.roomState
-            ? { ...s.roomState, phase: 'game_over', scores: msg.finalScores }
-            : null,
-        }));
-        break;
-
+          roomState: s.roomState ? { ...s.roomState, phase: 'game_over', scores: msg.finalScores } : null,
+        })); break;
       case 'PLAYER_JOINED':
-        set((s) => ({
-          roomState: s.roomState
-            ? { ...s.roomState, players: [...s.roomState.players, msg.player] }
-            : null,
-        }));
-        break;
-
+        set((s) => ({ roomState: s.roomState
+          ? { ...s.roomState, players: [...s.roomState.players, msg.player] } : null })); break;
       case 'PLAYER_LEFT':
-        set((s) => ({
-          roomState: s.roomState
-            ? {
-                ...s.roomState,
-                players: s.roomState.players.map((p) =>
-                  p.id === msg.playerId ? { ...p, isConnected: false } : p
-                ),
-              }
-            : null,
-        }));
-        break;
-
+        set((s) => ({ roomState: s.roomState ? {
+          ...s.roomState,
+          players: s.roomState.players.map(p => p.id === msg.playerId ? { ...p, isConnected: false } : p),
+        } : null })); break;
       case 'KICKED':
       case 'YOU_LEFT':
         get().ws?.close();
-        set({
-          ws: null, connectionStatus: 'disconnected',
-          roomCode: null, roomState: null, myPlayerId: null,
-          currentWord: null, currentDrawEvents: [], turnDrawEvents: [],
-          lastError: msg.type === 'KICKED' ? '你已被房主移除房間' : null,
-        });
-        break;
-
+        set({ ws: null, connectionStatus: 'disconnected', roomCode: null, roomState: null,
+          myPlayerId: null, currentWord: null, currentDrawEvents: [], turnDrawEvents: [],
+          lastError: msg.type === 'KICKED' ? '你已被房主移除房間' : null }); break;
       case 'ERROR':
-        set({ lastError: msg.message });
-        break;
-
-      // Draw relay events — add to live draw buffer
-      case 'DRAW_START':
-      case 'DRAW_MOVE':
-      case 'DRAW_END':
-      case 'DRAW_UNDO':
-      case 'DRAW_CLEAR': {
-        const { fromId: _discarded, ...event } = msg as typeof msg & { fromId: string };
-        void _discarded;
-        set((s) => ({ currentDrawEvents: [...s.currentDrawEvents, event as DrawEvent] }));
-        break;
+        set({ lastError: msg.message }); break;
+      case 'DRAW_START': case 'DRAW_MOVE': case 'DRAW_END': case 'DRAW_UNDO': case 'DRAW_CLEAR': {
+        const { fromId: _d, ...event } = msg as typeof msg & { fromId: string };
+        void _d;
+        set((s) => ({ currentDrawEvents: [...s.currentDrawEvents, event as DrawEvent] })); break;
       }
     }
   },
@@ -216,9 +135,7 @@ export const useNetworkStore = create<NetworkState>((set, get) => ({
   _connect: (roomCode, playerName, teamName) => {
     get().ws?.close();
     set({ connectionStatus: 'connecting', roomCode, myPlayerName: playerName, myTeamName: teamName });
-
     const ws = new WebSocket(getWsUrl(roomCode));
-
     ws.onopen = () => {
       set({ connectionStatus: 'connected' });
       ws.send(JSON.stringify({ type: 'JOIN', playerName, teamName } as ClientMessage));
@@ -229,22 +146,17 @@ export const useNetworkStore = create<NetworkState>((set, get) => ({
       try {
         const msg = JSON.parse(e.data as string) as ServerMessage;
         if (msg.type === 'ROOM_STATE' && !get().myPlayerId) {
-          const match = msg.room.players.find(
-            (p) => p.name === get().myPlayerName && p.isConnected
-          );
+          const match = msg.room.players.find(p => p.name === get().myPlayerName && p.isConnected);
           if (match) set({ myPlayerId: match.id });
         }
         get()._handleServerMessage(msg);
       } catch { /* ignore */ }
     };
-
     set({ ws });
   },
 
   _send: (msg) => {
     const { ws } = get();
-    if (ws?.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(msg));
-    }
+    if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
   },
 }));
