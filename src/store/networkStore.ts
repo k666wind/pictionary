@@ -35,7 +35,14 @@ interface NetworkState {
   _handleServerMessage: (msg: ServerMessage) => void;
   _connect: (roomCode: string, playerName: string, teamName: string) => void;
   _send: (msg: ClientMessage) => void;
+  _reset: () => void;
 }
+
+const RESET_STATE = {
+  ws: null, connectionStatus: 'disconnected' as ConnectionStatus,
+  roomCode: null, roomState: null, myPlayerId: null,
+  currentWord: null, currentDrawEvents: [], turnDrawEvents: [], lastError: null,
+};
 
 function generateRoomCode(): string {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -44,8 +51,7 @@ function generateRoomCode(): string {
 
 function getWsUrl(roomCode: string): string {
   const host: string = __PARTYKIT_HOST__;
-  const isLocal = host.startsWith('localhost');
-  return `${isLocal ? 'ws' : 'wss'}://${host}/party/${roomCode.toLowerCase()}`;
+  return `${host.startsWith('localhost') ? 'ws' : 'wss'}://${host}/party/${roomCode.toLowerCase()}`;
 }
 
 export const useNetworkStore = create<NetworkState>((set, get) => ({
@@ -71,10 +77,13 @@ export const useNetworkStore = create<NetworkState>((set, get) => ({
   joinRoom: (code, p, t) => get()._connect(code.toUpperCase(), p, t),
 
   leaveRoom: () => {
-    get()._send({ type: 'LEAVE' });
-    get().ws?.close();
-    set({ ws: null, connectionStatus: 'disconnected', roomCode: null, roomState: null,
-      myPlayerId: null, currentWord: null, currentDrawEvents: [], turnDrawEvents: [], lastError: null });
+    const { ws } = get();
+    // Send LEAVE first, then close after a short delay so message has time to send
+    if (ws?.readyState === WebSocket.OPEN) {
+      try { ws.send(JSON.stringify({ type: 'LEAVE' })); } catch { /* ignore */ }
+      setTimeout(() => ws.close(), 100);
+    }
+    set({ ...RESET_STATE, myPlayerName: get().myPlayerName, myTeamName: get().myTeamName });
   },
 
   setReady: (ready) => get()._send(ready ? { type: 'READY' } : { type: 'UNREADY' }),
@@ -84,6 +93,8 @@ export const useNetworkStore = create<NetworkState>((set, get) => ({
   kickPlayer: (id) => get()._send({ type: 'KICK', playerId: id }),
   sendDrawEvent: (event) => get()._send(event as unknown as ClientMessage),
   clearError: () => set({ lastError: null }),
+
+  _reset: () => set({ ...RESET_STATE, myPlayerName: get().myPlayerName, myTeamName: get().myTeamName }),
 
   _handleServerMessage: (msg) => {
     switch (msg.type) {
@@ -109,19 +120,27 @@ export const useNetworkStore = create<NetworkState>((set, get) => ({
           roomState: s.roomState ? { ...s.roomState, phase: 'game_over', scores: msg.finalScores } : null,
         })); break;
       case 'PLAYER_JOINED':
-        set((s) => ({ roomState: s.roomState
-          ? { ...s.roomState, players: [...s.roomState.players, msg.player] } : null })); break;
+        set((s) => ({
+          roomState: s.roomState
+            ? { ...s.roomState, players: [...s.roomState.players, msg.player] }
+            : null,
+        })); break;
       case 'PLAYER_LEFT':
-        set((s) => ({ roomState: s.roomState ? {
-          ...s.roomState,
-          players: s.roomState.players.map(p => p.id === msg.playerId ? { ...p, isConnected: false } : p),
-        } : null })); break;
+        set((s) => ({
+          roomState: s.roomState ? {
+            ...s.roomState,
+            players: s.roomState.players.map(p =>
+              p.id === msg.playerId ? { ...p, isConnected: false } : p
+            ),
+          } : null,
+        })); break;
       case 'KICKED':
-      case 'YOU_LEFT':
+        set({ ...RESET_STATE, lastError: '你已被房主移除房間' });
         get().ws?.close();
-        set({ ws: null, connectionStatus: 'disconnected', roomCode: null, roomState: null,
-          myPlayerId: null, currentWord: null, currentDrawEvents: [], turnDrawEvents: [],
-          lastError: msg.type === 'KICKED' ? '你已被房主移除房間' : null }); break;
+        break;
+      case 'YOU_LEFT':
+        // Already reset via leaveRoom(), ignore
+        break;
       case 'ERROR':
         set({ lastError: msg.message }); break;
       case 'DRAW_START': case 'DRAW_MOVE': case 'DRAW_END': case 'DRAW_UNDO': case 'DRAW_CLEAR': {
@@ -134,17 +153,23 @@ export const useNetworkStore = create<NetworkState>((set, get) => ({
 
   _connect: (roomCode, playerName, teamName) => {
     get().ws?.close();
-    set({ connectionStatus: 'connecting', roomCode, myPlayerName: playerName, myTeamName: teamName });
+    set({ connectionStatus: 'connecting', roomCode, myPlayerName: playerName, myTeamName: teamName, myPlayerId: null });
+
     const ws = new WebSocket(getWsUrl(roomCode));
+
     ws.onopen = () => {
-      set({ connectionStatus: 'connected' });
+      set({ connectionStatus: 'connected', ws });
       ws.send(JSON.stringify({ type: 'JOIN', playerName, teamName } as ClientMessage));
     };
-    ws.onclose = () => set({ connectionStatus: 'disconnected' });
+    ws.onclose = () => {
+      // Only update status; don't wipe roomState here (leaveRoom already did)
+      set((s) => s.connectionStatus !== 'disconnected' ? { connectionStatus: 'disconnected' } : s);
+    };
     ws.onerror = () => set({ connectionStatus: 'error', lastError: '連線失敗，請檢查網絡' });
     ws.onmessage = (e) => {
       try {
         const msg = JSON.parse(e.data as string) as ServerMessage;
+        // Auto-detect our playerId from first ROOM_STATE
         if (msg.type === 'ROOM_STATE' && !get().myPlayerId) {
           const match = msg.room.players.find(p => p.name === get().myPlayerName && p.isConnected);
           if (match) set({ myPlayerId: match.id });
@@ -152,11 +177,14 @@ export const useNetworkStore = create<NetworkState>((set, get) => ({
         get()._handleServerMessage(msg);
       } catch { /* ignore */ }
     };
+
     set({ ws });
   },
 
   _send: (msg) => {
     const { ws } = get();
-    if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
+    if (ws?.readyState === WebSocket.OPEN) {
+      try { ws.send(JSON.stringify(msg)); } catch { /* ignore */ }
+    }
   },
 }));
