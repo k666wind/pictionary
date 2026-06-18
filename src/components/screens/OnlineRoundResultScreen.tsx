@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect } from 'react';
 import { useGameStore } from '../../store/gameStore';
 import { useNetworkStore } from '../../store/networkStore';
 import ViewerCanvas from '../ui/ViewerCanvas';
