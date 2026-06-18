@@ -15,6 +15,7 @@ import OnlineLobbyScreen from './components/screens/OnlineLobbyScreen';
 import WaitingRoomScreen from './components/screens/WaitingRoomScreen';
 import OnlineWordCardScreen from './components/screens/OnlineWordCardScreen';
 import OnlineTimerScreen from './components/screens/OnlineTimerScreen';
+import OnlineRoundResultScreen from './components/screens/OnlineRoundResultScreen';
 
 export default function App() {
   const screen = useGameStore((s) => s.screen);
@@ -37,7 +38,7 @@ export default function App() {
       {screen === 'waiting-room'       && <WaitingRoomScreen />}
       {screen === 'online-word-card'   && <OnlineWordCardScreen />}
       {screen === 'online-timer'       && <OnlineTimerScreen />}
-      {screen === 'online-round-result' && <RoundResultScreen isOnline />}
+      {screen === 'online-round-result' && <OnlineRoundResultScreen />}
       {screen === 'online-game-over'   && <GameOverScreen isOnline />}
     </div>
   );

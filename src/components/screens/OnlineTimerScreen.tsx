@@ -7,55 +7,43 @@ import type { DrawEvent } from '../../types/network';
 
 export default function OnlineTimerScreen() {
   const setScreen = useGameStore((s) => s.setScreen);
-  const {
-    roomState,
-    myPlayerId,
-    isHost,
-    isDrawer,
-    currentDrawEvents,
-    sendDrawEvent,
-    markGuessed,
-    markSkipped,
-  } = useNetworkStore();
+  const roomState = useNetworkStore((s) => s.roomState);
+  const isHost = useNetworkStore((s) => s.isHost);
+  const isDrawer = useNetworkStore((s) => s.isDrawer);
+  const currentDrawEvents = useNetworkStore((s) => s.currentDrawEvents);
+  const sendDrawEvent = useNetworkStore((s) => s.sendDrawEvent);
+  const markGuessed = useNetworkStore((s) => s.markGuessed);
+  const markSkipped = useNetworkStore((s) => s.markSkipped);
+  const leaveRoom = useNetworkStore((s) => s.leaveRoom);
+  const myPlayerId = useNetworkStore((s) => s.myPlayerId);
 
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Phase navigation
   useEffect(() => {
     if (!roomState) { setScreen('online-lobby'); return; }
-    if (roomState.phase === 'turn_result') {
+    if (roomState.phase === 'turn_result' || roomState.phase === 'countdown') {
       stopTimer();
       setScreen('online-round-result');
     }
-    if (roomState.phase === 'game_over') {
-      stopTimer();
-      setScreen('online-game-over');
-    }
-    if (roomState.phase === 'waiting') {
-      stopTimer();
-      setScreen('waiting-room');
-    }
+    if (roomState.phase === 'game_over') { stopTimer(); setScreen('online-game-over'); }
+    if (roomState.phase === 'waiting')   { stopTimer(); setScreen('waiting-room'); }
   }, [roomState?.phase]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Host runs the timer
+  // Host runs timer
   useEffect(() => {
     if (!roomState || roomState.phase !== 'playing') return;
     if (!isHost()) return;
 
     timerRef.current = setInterval(() => {
-      const { roomState: rs, markGuessed: _mg, markSkipped: _ms } = useNetworkStore.getState();
+      const rs = useNetworkStore.getState().roomState;
       if (!rs || rs.phase !== 'playing') { stopTimer(); return; }
       const next = rs.timeLeft - 1;
       if (next <= 0) {
         stopTimer();
-        // Time up = skipped
         useNetworkStore.getState().markSkipped();
       } else {
-        // Broadcast tick
-        useNetworkStore.getState().ws?.send(
-          JSON.stringify({ type: 'TIMER_TICK', timeLeft: next })
-        );
-        // Update local state optimistically
+        useNetworkStore.getState()._send({ type: 'TIMER_TICK', timeLeft: next });
         useNetworkStore.setState((s) => ({
           roomState: s.roomState ? { ...s.roomState, timeLeft: next } : null,
         }));
@@ -69,6 +57,12 @@ export default function OnlineTimerScreen() {
     if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
   }
 
+  const handleLeave = () => {
+    stopTimer();
+    leaveRoom();
+    setScreen('home');
+  };
+
   if (!roomState) return null;
 
   const timeLeft = roomState.timeLeft;
@@ -76,101 +70,69 @@ export default function OnlineTimerScreen() {
   const amDrawer = isDrawer();
   const amHost = isHost();
   const drawer = roomState.players[roomState.currentDrawerIndex];
-
   const timerPct = timeLeft / settings.timerSeconds;
   const timerColor = timerPct > 0.5 ? '#22c55e' : timerPct > 0.25 ? '#f59e0b' : '#ef4444';
 
-  const handleDrawEvent = (ev: DrawEvent) => {
-    sendDrawEvent(ev);
-  };
-
   return (
-    <div
-      style={{
-        position: 'fixed',
-        inset: 0,
-        display: 'flex',
-        flexDirection: 'column',
-        overflow: 'hidden',
-      }}
-    >
-      {/* Top bar */}
-      <div
-        style={{
-          padding: '10px 16px',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          background: 'rgba(0,0,0,0.3)',
-          flexShrink: 0,
-        }}
-      >
-        <div style={{ fontSize: 13, opacity: 0.7 }}>
-          {amDrawer ? '🎨 畫緊！' : `👁️ ${drawer?.name ?? ''} 畫緊`}
-        </div>
+    <div style={{ position: 'fixed', inset: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
 
-        {/* Timer */}
-        <div
-          style={{
-            fontSize: 32,
-            fontWeight: 900,
-            color: timerColor,
-            fontVariantNumeric: 'tabular-nums',
-            transition: 'color 0.4s',
-          }}
-        >
+      {/* Top bar */}
+      <div style={{
+        padding: '8px 14px',
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        background: 'rgba(0,0,0,0.35)', flexShrink: 0,
+      }}>
+        <div style={{ fontSize: 12, opacity: 0.7 }}>
+          {amDrawer ? '🎨 你係畫者' : `👁 ${drawer?.name ?? ''} 畫緊`}
+        </div>
+        <div style={{ fontSize: 30, fontWeight: 900, color: timerColor, fontVariantNumeric: 'tabular-nums' }}>
           {timeLeft}
         </div>
-
-        <div style={{ fontSize: 13, opacity: 0.7 }}>
-          第 {roomState.currentRound}/{settings.totalRounds} 輪
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 12, opacity: 0.6 }}>
+            第{roomState.currentRound}/{settings.totalRounds}輪
+          </span>
+          <button
+            onClick={handleLeave}
+            style={{
+              background: 'rgba(239,68,68,0.2)', border: 'none',
+              borderRadius: 8, color: '#fca5a5',
+              fontSize: 12, padding: '4px 10px', cursor: 'pointer',
+            }}
+          >
+            離開
+          </button>
         </div>
       </div>
 
       {/* Timer bar */}
-      <div style={{ height: 4, background: 'rgba(255,255,255,0.1)', flexShrink: 0 }}>
-        <div
-          style={{
-            height: '100%',
-            width: `${timerPct * 100}%`,
-            background: timerColor,
-            transition: 'width 0.9s linear, background 0.4s',
-          }}
-        />
+      <div style={{ height: 3, background: 'rgba(255,255,255,0.1)', flexShrink: 0 }}>
+        <div style={{
+          height: '100%', width: `${timerPct * 100}%`,
+          background: timerColor, transition: 'width 0.9s linear, background 0.4s',
+        }} />
       </div>
 
-      {/* Canvas area */}
-      <div style={{ flex: 1, minHeight: 0, padding: amDrawer ? 0 : 12, display: 'flex' }}>
-        {amDrawer ? (
-          <DrawingCanvas onDrawEvent={handleDrawEvent} height="100%" />
-        ) : (
-          <ViewerCanvas events={currentDrawEvents} height="100%" />
-        )}
+      {/* Canvas */}
+      <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
+        {amDrawer
+          ? <DrawingCanvas onDrawEvent={(ev: DrawEvent) => sendDrawEvent(ev)} height="100%" />
+          : <ViewerCanvas events={currentDrawEvents} height="100%" />
+        }
       </div>
 
       {/* Host controls */}
       {amHost && (
-        <div
-          style={{
-            display: 'flex',
-            gap: 10,
-            padding: '10px 16px',
-            background: 'rgba(0,0,0,0.25)',
-            flexShrink: 0,
-          }}
-        >
+        <div style={{
+          display: 'flex', gap: 10, padding: '10px 14px',
+          background: 'rgba(0,0,0,0.25)', flexShrink: 0,
+        }}>
           <button
             onClick={markGuessed}
             style={{
-              flex: 1,
-              padding: '12px 0',
-              fontWeight: 800,
-              fontSize: 15,
-              background: 'rgba(34,197,94,0.3)',
-              border: '2px solid rgba(34,197,94,0.6)',
-              borderRadius: 12,
-              color: 'inherit',
-              cursor: 'pointer',
+              flex: 1, padding: '12px 0', fontWeight: 800, fontSize: 15,
+              background: 'rgba(34,197,94,0.3)', border: '2px solid rgba(34,197,94,0.6)',
+              borderRadius: 12, color: 'inherit', cursor: 'pointer',
             }}
           >
             ✅ 猜中！
@@ -178,15 +140,9 @@ export default function OnlineTimerScreen() {
           <button
             onClick={markSkipped}
             style={{
-              flex: 1,
-              padding: '12px 0',
-              fontWeight: 800,
-              fontSize: 15,
-              background: 'rgba(239,68,68,0.2)',
-              border: '2px solid rgba(239,68,68,0.4)',
-              borderRadius: 12,
-              color: 'inherit',
-              cursor: 'pointer',
+              flex: 1, padding: '12px 0', fontWeight: 800, fontSize: 15,
+              background: 'rgba(239,68,68,0.2)', border: '2px solid rgba(239,68,68,0.4)',
+              borderRadius: 12, color: 'inherit', cursor: 'pointer',
             }}
           >
             ⏭️ 跳過
@@ -194,18 +150,9 @@ export default function OnlineTimerScreen() {
         </div>
       )}
 
-      {/* Non-host spectator note */}
       {!amHost && !amDrawer && (
-        <div
-          style={{
-            padding: '8px 16px',
-            textAlign: 'center',
-            fontSize: 13,
-            opacity: 0.5,
-            flexShrink: 0,
-          }}
-        >
-          等待房主判斷結果…
+        <div style={{ padding: '8px', textAlign: 'center', fontSize: 12, opacity: 0.45, flexShrink: 0 }}>
+          等待房主判斷…
         </div>
       )}
     </div>

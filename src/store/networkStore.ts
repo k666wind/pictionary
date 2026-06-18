@@ -13,7 +13,10 @@ interface NetworkState {
   myPlayerName: string;
   myTeamName: string;
   currentWord: Word | null;
+  // Live draw events (during playing phase)
   currentDrawEvents: DrawEvent[];
+  // Stored draw events for turn_result replay
+  turnDrawEvents: DrawEvent[];
   lastError: string | null;
 
   isHost: () => boolean;
@@ -31,9 +34,7 @@ interface NetworkState {
   sendDrawEvent: (event: DrawEvent) => void;
   clearError: () => void;
 
-  // Internal — must be declared in interface for TypeScript
   _handleServerMessage: (msg: ServerMessage) => void;
-  _setPlayerId: (id: string) => void;
   _connect: (roomCode: string, playerName: string, teamName: string) => void;
   _send: (msg: ClientMessage) => void;
 }
@@ -43,9 +44,7 @@ function generateRoomCode(): string {
   return Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
 }
 
-function getPartyKitUrl(roomCode: string): string {
-  // __PARTYKIT_HOST__ is injected at build time by vite.config.ts define block
-  // declared in src/vite-env.d.ts as: declare const __PARTYKIT_HOST__: string
+function getWsUrl(roomCode: string): string {
   const host: string = __PARTYKIT_HOST__;
   const isLocal = host.startsWith('localhost');
   const protocol = isLocal ? 'ws' : 'wss';
@@ -62,6 +61,7 @@ export const useNetworkStore = create<NetworkState>((set, get) => ({
   myTeamName: '',
   currentWord: null,
   currentDrawEvents: [],
+  turnDrawEvents: [],
   lastError: null,
 
   isHost: () => {
@@ -72,8 +72,7 @@ export const useNetworkStore = create<NetworkState>((set, get) => ({
   isDrawer: () => {
     const { myPlayerId, roomState } = get();
     if (!myPlayerId || !roomState) return false;
-    const drawer = roomState.players[roomState.currentDrawerIndex];
-    return drawer?.id === myPlayerId;
+    return roomState.players[roomState.currentDrawerIndex]?.id === myPlayerId;
   },
 
   getCurrentDrawer: () => {
@@ -91,15 +90,13 @@ export const useNetworkStore = create<NetworkState>((set, get) => ({
   },
 
   leaveRoom: () => {
+    // Tell server we're leaving
+    get()._send({ type: 'LEAVE' } as ClientMessage);
     get().ws?.close();
     set({
-      ws: null,
-      connectionStatus: 'disconnected',
-      roomCode: null,
-      roomState: null,
-      myPlayerId: null,
-      currentWord: null,
-      currentDrawEvents: [],
+      ws: null, connectionStatus: 'disconnected',
+      roomCode: null, roomState: null, myPlayerId: null,
+      currentWord: null, currentDrawEvents: [], turnDrawEvents: [],
       lastError: null,
     });
   },
@@ -117,37 +114,47 @@ export const useNetworkStore = create<NetworkState>((set, get) => ({
   kickPlayer: (id) => get()._send({ type: 'KICK', playerId: id }),
 
   sendDrawEvent: (event) => {
-    get()._send(event as ClientMessage);
+    get()._send(event as unknown as ClientMessage);
   },
 
   clearError: () => set({ lastError: null }),
-
-  _setPlayerId: (id) => set({ myPlayerId: id }),
 
   _handleServerMessage: (msg) => {
     switch (msg.type) {
       case 'ROOM_STATE':
         set({ roomState: msg.room });
         break;
+
       case 'GAME_STARTED':
-        set({ currentDrawEvents: [], currentWord: null });
+        // New turn starting — clear draw events
+        set({ currentDrawEvents: [], turnDrawEvents: [], currentWord: null });
         break;
+
       case 'YOUR_WORD':
         set({ currentWord: msg.word });
         break;
+
       case 'TIMER_TICK':
         set((s) => ({
           roomState: s.roomState ? { ...s.roomState, timeLeft: msg.timeLeft } : null,
         }));
         break;
+
       case 'TURN_END':
         set((s) => ({
           roomState: s.roomState
             ? { ...s.roomState, phase: 'turn_result', scores: msg.scores, lastResult: msg.result }
             : null,
           currentWord: null,
+          currentDrawEvents: [],
         }));
         break;
+
+      case 'TURN_DRAW_EVENTS':
+        // Server sends stored draw events for replay on turn_result screen
+        set({ turnDrawEvents: msg.events });
+        break;
+
       case 'GAME_OVER':
         set((s) => ({
           roomState: s.roomState
@@ -155,6 +162,7 @@ export const useNetworkStore = create<NetworkState>((set, get) => ({
             : null,
         }));
         break;
+
       case 'PLAYER_JOINED':
         set((s) => ({
           roomState: s.roomState
@@ -162,6 +170,7 @@ export const useNetworkStore = create<NetworkState>((set, get) => ({
             : null,
         }));
         break;
+
       case 'PLAYER_LEFT':
         set((s) => ({
           roomState: s.roomState
@@ -174,13 +183,23 @@ export const useNetworkStore = create<NetworkState>((set, get) => ({
             : null,
         }));
         break;
+
       case 'KICKED':
-        get().leaveRoom();
-        set({ lastError: '你已被房主移除房間' });
+      case 'YOU_LEFT':
+        get().ws?.close();
+        set({
+          ws: null, connectionStatus: 'disconnected',
+          roomCode: null, roomState: null, myPlayerId: null,
+          currentWord: null, currentDrawEvents: [], turnDrawEvents: [],
+          lastError: msg.type === 'KICKED' ? '你已被房主移除房間' : null,
+        });
         break;
+
       case 'ERROR':
         set({ lastError: msg.message });
         break;
+
+      // Draw relay events — add to live draw buffer
       case 'DRAW_START':
       case 'DRAW_MOVE':
       case 'DRAW_END':
@@ -198,21 +217,21 @@ export const useNetworkStore = create<NetworkState>((set, get) => ({
     get().ws?.close();
     set({ connectionStatus: 'connecting', roomCode, myPlayerName: playerName, myTeamName: teamName });
 
-    const ws = new WebSocket(getPartyKitUrl(roomCode));
+    const ws = new WebSocket(getWsUrl(roomCode));
 
     ws.onopen = () => {
       set({ connectionStatus: 'connected' });
       ws.send(JSON.stringify({ type: 'JOIN', playerName, teamName } as ClientMessage));
     };
     ws.onclose = () => set({ connectionStatus: 'disconnected' });
-    ws.onerror = () =>
-      set({ connectionStatus: 'error', lastError: '連線失敗，請檢查網絡' });
+    ws.onerror = () => set({ connectionStatus: 'error', lastError: '連線失敗，請檢查網絡' });
     ws.onmessage = (e) => {
       try {
         const msg = JSON.parse(e.data as string) as ServerMessage;
         if (msg.type === 'ROOM_STATE' && !get().myPlayerId) {
-          const { myPlayerName } = get();
-          const match = msg.room.players.find((p) => p.name === myPlayerName && p.isConnected);
+          const match = msg.room.players.find(
+            (p) => p.name === get().myPlayerName && p.isConnected
+          );
           if (match) set({ myPlayerId: match.id });
         }
         get()._handleServerMessage(msg);
