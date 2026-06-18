@@ -66,7 +66,7 @@ export default function OnlineTimerScreen() {
   const settings   = roomState.settings;
   const drawer     = roomState.players[roomState.currentDrawerIndex];
   const isADrawer  = amDrawer();
-  const isAHost    = amHost();
+
   const timerPct   = timeLeft / settings.timerSeconds;
   const timerColor = timerPct > 0.5 ? '#22c55e' : timerPct > 0.25 ? '#f59e0b' : '#ef4444';
 
