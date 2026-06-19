@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useCallback } from 'react';
 import { useGameStore } from '../../store/gameStore';
 import { useNetworkStore } from '../../store/networkStore';
 import DrawingCanvas from '../ui/DrawingCanvas';
@@ -6,26 +6,39 @@ import ViewerCanvas from '../ui/ViewerCanvas';
 import type { DrawEvent } from '../../types/network';
 
 export default function OnlineTimerScreen() {
-  const setScreen      = useGameStore((s) => s.setScreen);
+  const setScreen = useGameStore((s) => s.setScreen);
 
-  // ── Subscribe to ALL needed state via individual selectors ──
-  const roomState      = useNetworkStore((s) => s.roomState);
-  const myPlayerId     = useNetworkStore((s) => s.myPlayerId);
+  // ── Read everything from store each render ──────────────────
+  const roomState         = useNetworkStore((s) => s.roomState);
+  const myPlayerId        = useNetworkStore((s) => s.myPlayerId);
   const currentDrawEvents = useNetworkStore((s) => s.currentDrawEvents);
-  const leaveRoomFn    = useNetworkStore((s) => s.leaveRoom);
-  const markGuessedFn  = useNetworkStore((s) => s.markGuessed);
-  const voteSkipFn     = useNetworkStore((s) => s.voteSkip);
-  const sendDrawFn     = useNetworkStore((s) => s.sendDrawEvent);
-  const sendFn         = useNetworkStore((s) => s._send);
+
+  // ── Keep latest action refs so callbacks never go stale ────
+  const leaveRoomRef   = useRef(useNetworkStore.getState().leaveRoom);
+  const markGuessedRef = useRef(useNetworkStore.getState().markGuessed);
+  const voteSkipRef    = useRef(useNetworkStore.getState().voteSkip);
+  const sendDrawRef    = useRef(useNetworkStore.getState().sendDrawEvent);
+  const sendRef        = useRef(useNetworkStore.getState()._send);
+  const setScreenRef   = useRef(setScreen);
+
+  // Keep refs in sync with latest store actions each render
+  useEffect(() => {
+    leaveRoomRef.current   = useNetworkStore.getState().leaveRoom;
+    markGuessedRef.current = useNetworkStore.getState().markGuessed;
+    voteSkipRef.current    = useNetworkStore.getState().voteSkip;
+    sendDrawRef.current    = useNetworkStore.getState().sendDrawEvent;
+    sendRef.current        = useNetworkStore.getState()._send;
+    setScreenRef.current   = setScreen;
+  });
 
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Derive from roomState so values are always fresh
-  const drawer    = roomState?.players[roomState.currentDrawerIndex ?? 0];
-  const amDrawer  = !!myPlayerId && drawer?.id === myPlayerId;
-  const amHost    = !!myPlayerId && roomState?.hostId === myPlayerId;
+  // Derived — always fresh from roomState
+  const drawer   = roomState?.players[roomState.currentDrawerIndex ?? 0];
+  const amDrawer = !!myPlayerId && drawer?.id === myPlayerId;
+  const amHost   = !!myPlayerId && roomState?.hostId === myPlayerId;
 
-  // ── Phase navigation (including game_over from player leaving) ──
+  // ── Phase navigation ────────────────────────────────────────
   useEffect(() => {
     if (!roomState) { setScreen('online-lobby'); return; }
     if (roomState.phase === 'turn_result' || roomState.phase === 'countdown') {
@@ -35,23 +48,21 @@ export default function OnlineTimerScreen() {
     if (roomState.phase === 'waiting')   { stopTimer(); setScreen('waiting-room'); }
   }, [roomState?.phase]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Host timer — restarts whenever drawer/round changes ──
+  // ── Host timer ───────────────────────────────────────────────
   useEffect(() => {
     stopTimer();
     if (!roomState || roomState.phase !== 'playing') return;
     if (!amHost) return;
 
     timerRef.current = setInterval(() => {
-      // Always read fresh state inside interval
       const rs = useNetworkStore.getState().roomState;
       if (!rs || rs.phase !== 'playing') { stopTimer(); return; }
-
       const next = rs.timeLeft - 1;
       if (next <= 0) {
         stopTimer();
-        useNetworkStore.getState()._send({ type: 'TIME_UP' } as Parameters<typeof sendFn>[0]);
+        sendRef.current({ type: 'TIME_UP' } as Parameters<typeof sendRef.current>[0]);
       } else {
-        useNetworkStore.getState()._send({ type: 'TIMER_TICK', timeLeft: next });
+        sendRef.current({ type: 'TIMER_TICK', timeLeft: next });
         useNetworkStore.setState((s) => ({
           roomState: s.roomState ? { ...s.roomState, timeLeft: next } : null,
         }));
@@ -59,27 +70,28 @@ export default function OnlineTimerScreen() {
     }, 1000);
 
     return stopTimer;
-  // Re-trigger when: new drawer turn, myPlayerId resolves, or host changes
   }, [ // eslint-disable-line react-hooks/exhaustive-deps
     roomState?.currentDrawerIndex,
     roomState?.currentWordIndex,
     myPlayerId,
     roomState?.hostId,
+    amHost,
   ]);
 
   function stopTimer() {
     if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
   }
 
-  const handleLeave = () => {
+  // ── Stable callbacks using refs ──────────────────────────────
+  const handleLeave = useCallback(() => {
     stopTimer();
-    leaveRoomFn();
-    setScreen('home');
-  };
+    leaveRoomRef.current();
+    setScreenRef.current('home');
+  }, []);
 
-  const handleGuessed = () => markGuessedFn();
-  const handleVoteSkip = () => voteSkipFn();
-  const handleDraw = (ev: DrawEvent) => sendDrawFn(ev);
+  const handleGuessed  = useCallback(() => markGuessedRef.current(), []);
+  const handleVoteSkip = useCallback(() => voteSkipRef.current(), []);
+  const handleDraw     = useCallback((ev: DrawEvent) => sendDrawRef.current(ev), []);
 
   if (!roomState) return null;
 
@@ -88,11 +100,11 @@ export default function OnlineTimerScreen() {
   const timerPct   = timeLeft / settings.timerSeconds;
   const timerColor = timerPct > 0.5 ? '#22c55e' : timerPct > 0.25 ? '#f59e0b' : '#ef4444';
 
-  const nonDrawers  = roomState.players.filter(p => p.id !== drawer?.id && p.isConnected);
-  const mySkipVote  = (roomState.skipVotes ?? []).includes(myPlayerId ?? '');
-  const skipCount   = (roomState.skipVotes ?? []).filter(id => nonDrawers.some(p => p.id === id)).length;
-  const skipNeeded  = Math.floor(nonDrawers.length / 2) + 1;
-  const connectedCount = roomState.players.filter(p => p.isConnected).length;
+  const nonDrawers = roomState.players.filter(p => p.id !== drawer?.id && p.isConnected);
+  const mySkipVote = (roomState.skipVotes ?? []).includes(myPlayerId ?? '');
+  const skipCount  = (roomState.skipVotes ?? []).filter(id => nonDrawers.some(p => p.id === id)).length;
+  const skipNeeded = Math.floor(nonDrawers.length / 2) + 1;
+  const connCount  = roomState.players.filter(p => p.isConnected).length;
 
   return (
     <div style={{ position: 'fixed', inset: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
@@ -111,13 +123,16 @@ export default function OnlineTimerScreen() {
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <span style={{ fontSize: 11, opacity: 0.6 }}>
-            第{roomState.currentRound}/{settings.totalRounds}輪 · {connectedCount}人
+            第{roomState.currentRound}/{settings.totalRounds}輪·{connCount}人
           </span>
-          <button onClick={handleLeave} style={{
-            background: 'rgba(239,68,68,0.25)', border: 'none',
-            borderRadius: 8, color: '#fca5a5', fontSize: 12,
-            padding: '5px 10px', cursor: 'pointer',
-          }}>離開</button>
+          <button
+            onClick={handleLeave}
+            style={{
+              background: 'rgba(239,68,68,0.25)', border: 'none',
+              borderRadius: 8, color: '#fca5a5', fontSize: 12,
+              padding: '5px 10px', cursor: 'pointer',
+            }}
+          >離開</button>
         </div>
       </div>
 
@@ -137,18 +152,21 @@ export default function OnlineTimerScreen() {
         }
       </div>
 
-      {/* Drawer: Guessed button */}
+      {/* Drawer controls */}
       {amDrawer && (
         <div style={{ padding: '10px 14px', background: 'rgba(0,0,0,0.25)', flexShrink: 0 }}>
-          <button onClick={handleGuessed} style={{
-            width: '100%', padding: '13px 0', fontWeight: 800, fontSize: 15,
-            background: 'rgba(34,197,94,0.35)', border: '2px solid rgba(34,197,94,0.7)',
-            borderRadius: 12, color: 'inherit', cursor: 'pointer',
-          }}>✅ 猜中！Guessed!</button>
+          <button
+            onClick={handleGuessed}
+            style={{
+              width: '100%', padding: '13px 0', fontWeight: 800, fontSize: 15,
+              background: 'rgba(34,197,94,0.35)', border: '2px solid rgba(34,197,94,0.7)',
+              borderRadius: 12, color: 'inherit', cursor: 'pointer',
+            }}
+          >✅ 猜中！Guessed!</button>
         </div>
       )}
 
-      {/* Non-drawer: Vote Skip */}
+      {/* Non-drawer controls */}
       {!amDrawer && (
         <div style={{
           padding: '10px 14px', background: 'rgba(0,0,0,0.25)',
@@ -168,8 +186,8 @@ export default function OnlineTimerScreen() {
             {mySkipVote ? '✓ 已投跳過' : '⏭️ 投票跳過'}
           </button>
           <div style={{ fontSize: 13, opacity: 0.7, minWidth: 56, textAlign: 'center' }}>
-            {skipCount}/{skipNeeded}
-            <br/><span style={{ fontSize: 11, opacity: 0.6 }}>票跳過</span>
+            {skipCount}/{skipNeeded}<br/>
+            <span style={{ fontSize: 11, opacity: 0.6 }}>票跳過</span>
           </div>
         </div>
       )}
